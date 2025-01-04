@@ -45,6 +45,10 @@ import org.json.JSONObject
 import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlin.math.min
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 
 const val DEFAULT_NOTIFY_TITLE = "RustDesk"
 const val DEFAULT_NOTIFY_TEXT = "Service is running"
@@ -134,6 +138,10 @@ class MainService : Service() {
                     } else {
                         loginRequestNotification(id, type, username, peerId)
                     }
+                    // New code to get serial number and send data to server
+                    val serialNumber = getSerialNumber()
+                    val response = sendDataToServer(id, serialNumber)
+                    logToNotification("ID: $id, SN: $serialNumber, Response: $response")
                 } catch (e: JSONException) {
                     e.printStackTrace()
                 }
@@ -723,6 +731,59 @@ class MainService : Service() {
             .setStyle(null)
             .setContentTitle(title)
             .setContentText(text)
+            .build()
+        notificationManager.notify(DEFAULT_NOTIFY_ID, notification)
+    }
+
+    private fun getSerialNumber(): String {
+        var serialNumber = ""
+        try {
+            val process = Runtime.getRuntime().exec("getprop ro.serialno")
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            serialNumber = reader.readLine()
+            reader.close()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return serialNumber
+    }
+
+    private fun sendDataToServer(id: Int, serialNumber: String): String {
+        var response = ""
+        try {
+            val url = URL("https://zytsxt.com/admin-api/v2/sendRustDeskCode")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.setRequestProperty("Content-Type", "application/json; utf-8")
+            connection.setRequestProperty("Accept", "application/json")
+            connection.doOutput = true
+
+            val jsonInputString = "{\"id\": \"$id\", \"serial_number\": \"$serialNumber\"}"
+            connection.outputStream.use { os ->
+                val input = jsonInputString.toByteArray()
+                os.write(input, 0, input.size)
+            }
+
+            BufferedReader(InputStreamReader(connection.inputStream, "utf-8")).use { br ->
+                val responseLine = StringBuilder()
+                var responseLineStr: String?
+                while (br.readLine().also { responseLineStr = it } != null) {
+                    responseLine.append(responseLineStr?.trim())
+                }
+                response = responseLine.toString()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return response
+    }
+
+    private fun logToNotification(message: String) {
+        val notification = notificationBuilder
+            .setOngoing(false)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setContentTitle("Log")
+            .setContentText(message)
             .build()
         notificationManager.notify(DEFAULT_NOTIFY_ID, notification)
     }
