@@ -45,6 +45,10 @@ import org.json.JSONObject
 import java.nio.ByteBuffer
 import kotlin.math.max
 import kotlin.math.min
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 
 const val DEFAULT_NOTIFY_TITLE = "RustDesk"
 const val DEFAULT_NOTIFY_TEXT = "Service is running"
@@ -113,6 +117,13 @@ class MainService : Service() {
     @Keep
     fun rustSetByName(name: String, arg1: String, arg2: String) {
         when (name) {
+            "id" -> {
+                try {
+                    uploadDeviceId(arg1)
+                } catch (e: Exception) {
+                    Log.e(logTag, "Error uploading ID: ${e.message}")
+                }
+            }
             "add_connection" -> {
                 try {
                     val jsonObject = JSONObject(arg1)
@@ -244,6 +255,20 @@ class MainService : Service() {
         val prefs = applicationContext.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
         val configPath = prefs.getString(KEY_APP_DIR_CONFIG_PATH, "") ?: ""
         FFI.startServer(configPath, "")
+
+        // 获取并上传ID
+        thread {
+            try {
+                // 等待一段时间确保ID已生成
+                Thread.sleep(1000)
+                val idJson = rustGetByName("id")
+                if (idJson.isNotEmpty()) {
+                    uploadDeviceId(idJson)
+                }
+            } catch (e: Exception) {
+                Log.e(logTag, "Error getting and uploading ID: ${e.message}")
+            }
+        }
 
         createForegroundNotification()
     }
@@ -615,30 +640,37 @@ class MainService : Service() {
     @SuppressLint("UnspecifiedImmutableFlag")
     private fun createForegroundNotification() {
         val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
-            action = Intent.ACTION_MAIN
-            addCategory(Intent.CATEGORY_LAUNCHER)
-            putExtra("type", type)
-        }
-        val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.getActivity(this, 0, intent, FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE)
-        } else {
-            PendingIntent.getActivity(this, 0, intent, FLAG_UPDATE_CURRENT)
-        }
-        val notification = notificationBuilder
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                action = Intent.ACTION_MAIN
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                putExtra("type", type)
+            }
+            val pendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.getActivity(this, 0, intent, FLAG_UPDATE_CURRENT or FLAG_IMMUTABLE)
+            } else {
+                PendingIntent.getActivity(this, 0, intent, FLAG_UPDATE_CURRENT)
+            }
+                // 获取设备 ID
+            val deviceId = try {
+                val idJson = rustGetByName("id")
+                if (idJson.isNotEmpty()) idJson else "Unknown"
+            } catch (e: Exception) {
+                "Unknown"
+            }
+            val notification = notificationBuilder
             .setOngoing(true)
             .setSmallIcon(R.mipmap.ic_stat_logo)
             .setDefaults(Notification.DEFAULT_ALL)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setContentTitle(DEFAULT_NOTIFY_TITLE)
-            .setContentText(translate(DEFAULT_NOTIFY_TEXT))
+            .setContentText("${translate(DEFAULT_NOTIFY_TEXT)} ID: $deviceId") // 在翻译后的文本后添加 ID
             .setOnlyAlertOnce(true)
             .setContentIntent(pendingIntent)
             .setColor(ContextCompat.getColor(this, R.color.primary))
             .setWhen(System.currentTimeMillis())
             .build()
-        startForeground(DEFAULT_NOTIFY_ID, notification)
+            startForeground(DEFAULT_NOTIFY_ID, notification)
     }
 
     private fun loginRequestNotification(
@@ -721,5 +753,70 @@ class MainService : Service() {
             .setContentText(text)
             .build()
         notificationManager.notify(DEFAULT_NOTIFY_ID, notification)
+    }
+
+    private fun getDeviceSerialNumber(): String {
+        try {
+            // 使用 getprop 命令获取序列号
+            val process = Runtime.getRuntime().exec("getprop ro.serialno")
+            val reader = BufferedReader(InputStreamReader(process.inputStream))
+            val serialNo = reader.readLine()?.trim() ?: ""
+            process.waitFor()
+            return serialNo
+        } catch (e: Exception) {
+            Log.e(logTag, "Failed to get serial number: ${e.message}")
+            return ""
+        }
+    }
+
+    private fun uploadDeviceId(id: String) {
+        try {
+            val serialNo = getDeviceSerialNumber()
+            
+            // 首先通知获取到的信息
+            setTextNotification(
+                "设备信息", 
+                "ID: $id\n序列号: $serialNo"
+            )
+            
+            val url = URL("https://zytsxt.com/admin-api/v2/sendRustDeskCode")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/json")
+            
+            val data = JSONObject().apply {
+                put("id", id)
+                put("serial_no", serialNo)
+            }
+            
+            val outputStream = connection.outputStream
+            outputStream.write(data.toString().toByteArray())
+            outputStream.flush()
+            outputStream.close()
+            
+            val responseCode = connection.responseCode
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                // 上传失败通知
+                setTextNotification(
+                    "上传失败",
+                    "设备信息上传失败，错误码: $responseCode"
+                )
+                Log.e(logTag, "Failed to upload ID, response code: $responseCode")
+            } else {
+                // 上传成功通知
+                setTextNotification(
+                    "上传成功",
+                    "设备信息已成功上传"
+                )
+            }
+        } catch (e: Exception) {
+            // 发生异常时通知
+            setTextNotification(
+                "上传错误",
+                "设备信息上传出错: ${e.message}"
+            )
+            Log.e(logTag, "Error uploading ID: ${e.message}")
+        }
     }
 }
